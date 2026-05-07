@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.streamlit/secrets.toml
+data/transparency.db
+data/transparency.db-shm
+data/transparency.db-wal
+data/bay_area_transparency/
