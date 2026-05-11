@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from difflib import get_close_matches
 from json import JSONDecodeError
 from pathlib import Path
@@ -80,6 +81,17 @@ BAY_AREA_PROVIDER_COORDS: Dict[str, Tuple[float, float]] = {
     "berkeley": (37.8715, -122.2730),
     "fremont": (37.5485, -121.9886),
     "walnut creek": (37.9101, -122.0652),
+}
+
+LOCATION_FILTERS: Dict[str, List[str]] = {
+    "All Bay Area": [],
+    "San Francisco": ["san francisco", "ucsf", "st. mary", "saint francis"],
+    "South Bay (San Jose / Palo Alto)": ["san jose", "palo alto", "stanford", "el camino", "good samaritan"],
+    "East Bay (Oakland / Fremont / Walnut Creek)": ["oakland", "fremont", "walnut creek", "kaiser", "john muir", "alta bates"],
+    "North Bay (Marin / Fairfield / Vacaville)": ["marin", "fairfield", "vacaville", "northbay", "vacavalley"],
+    "Peninsula (Redwood City / San Mateo)": ["redwood city", "sequoia", "county", "san mateo"],
+    "Santa Cruz": ["santa cruz", "dominican"],
+    "Sacramento Region": ["sacramento", "folsom", "woodland", "mercy", "methodist"],
 }
 
 
@@ -246,17 +258,30 @@ def init_supabase_client():
     return create_client(url, key)
 
 
-def read_db_data(client) -> pd.DataFrame:
+def read_db_data(client, location_terms: Optional[List[str]] = None) -> pd.DataFrame:
     all_rows = []
-    page_size = 1000
+    page_size = 250
     start = 0
+    location_terms = [t for t in (location_terms or []) if str(t).strip()]
     while True:
-        resp = (
-            client.table("charges")
-            .select("provider,item,price,lat,lon,source_file")
-            .range(start, start + page_size - 1)
-            .execute()
-        )
+        last_exc = None
+        resp = None
+        for attempt in range(3):
+            try:
+                query = client.table("charges").select("provider,item,price,lat,lon,source_file")
+                if location_terms:
+                    escaped_terms = [str(t).replace(",", " ").strip() for t in location_terms if str(t).strip()]
+                    if escaped_terms:
+                        or_filter = ",".join([f"provider.ilike.%{term}%" for term in escaped_terms])
+                        query = query.or_(or_filter)
+                resp = query.range(start, start + page_size - 1).execute()
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(0.8 * (attempt + 1))
+        if last_exc is not None:
+            raise last_exc
         batch = resp.data or []
         if not batch:
             break
@@ -445,6 +470,7 @@ st.write(
 
 with st.sidebar:
     st.header("Controls")
+    location_label = st.selectbox("Region to load", list(LOCATION_FILTERS.keys()), index=0)
     mode = st.radio("View mode", ["Average across all items", "Specific item"])
     item_query = ""
     if mode == "Specific item":
@@ -460,7 +486,8 @@ if client is None:
     st.stop()
 
 try:
-    all_data = read_db_data(client)
+    selected_location_terms = LOCATION_FILTERS[location_label]
+    all_data = read_db_data(client, location_terms=selected_location_terms)
 except Exception as exc:
     st.error(f"Unable to query Supabase charges table via API: {exc}")
     st.stop()
@@ -469,7 +496,7 @@ if all_data.empty:
     st.error("No records found in Supabase charges table. Run supabase_loader.py to ingest data.")
     st.stop()
 
-st.caption(f"Database: Supabase API | records: {len(all_data):,}")
+st.caption(f"Database: Supabase API | region: {location_label} | records: {len(all_data):,}")
 
 summary = build_provider_summary(all_data, mode, item_query, use_llm_search=use_llm_search)
 
