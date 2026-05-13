@@ -582,4 +582,5 @@ tooltip = {
 st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip))
 
 st.subheader("Provider price table")
-st.dataframe(summary.sort_values("avg_price", ascending=True), use_container_width=True)
+table_summary = summary[["provider", "avg_price"]].rename(columns={"provider": "name"}).sort_values("avg_price", ascending=True)
+st.dataframe(table_summary, use_container_width=True)
