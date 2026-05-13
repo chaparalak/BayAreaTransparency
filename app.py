@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
-from supabase import create_client
+from supabase_utils import create_supabase_client, get_supabase_config_for_app
 
 try:
     from openai import OpenAI
@@ -244,18 +244,10 @@ def extract_charge_rows(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
     return out
 
 
-def get_supabase_config() -> Tuple[Optional[str], Optional[str]]:
-    url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY")
-    return url, key
-
-
 @st.cache_resource
 def init_supabase_client():
-    url, key = get_supabase_config()
-    if not url or not key:
-        return None
-    return create_client(url, key)
+    url, key = get_supabase_config_for_app()
+    return create_supabase_client(url, key)
 
 
 def read_db_data(client, location_terms: Optional[List[str]] = None) -> pd.DataFrame:
@@ -479,14 +471,40 @@ st.write(
 
 with st.sidebar:
     st.header("Controls")
-    location_label = st.selectbox("Region to load", list(LOCATION_FILTERS.keys()), index=0)
-    mode = st.radio("View mode", ["Average across all items", "Specific item"])
+    default_location = LOCATION_FILTERS.keys().__iter__().__next__()
+    applied_location_label = st.session_state.get("applied_location_label", default_location)
+    applied_mode = st.session_state.get("applied_mode", "Average across all items")
+    applied_item_query = st.session_state.get("applied_item_query", "")
+    applied_use_llm_search = st.session_state.get("applied_use_llm_search", False)
+
+    location_label = st.selectbox("Region to load", list(LOCATION_FILTERS.keys()), index=list(LOCATION_FILTERS.keys()).index(applied_location_label))
+    mode = st.radio("View mode", ["Average across all items", "Specific item"], index=0 if applied_mode == "Average across all items" else 1)
     item_query = ""
+    use_llm_search = False
     if mode == "Specific item":
-        item_query = st.text_input("Search item/procedure", placeholder="e.g. MRI, CT abdomen, DRG 470")
-        use_llm_search = st.toggle("Smart search (LLM if key exists)", value=False)
-    else:
-        use_llm_search = False
+        item_query = st.text_input("Search item/procedure", value=applied_item_query, placeholder="e.g. MRI, CT abdomen, DRG 470")
+        use_llm_search = st.toggle("Smart search (LLM if key exists)", value=applied_use_llm_search)
+
+    pending_changes = (
+        location_label != applied_location_label
+        or mode != applied_mode
+        or item_query != applied_item_query
+        or use_llm_search != applied_use_llm_search
+    )
+    refresh_clicked = st.button("Refresh data")
+    if pending_changes and not refresh_clicked:
+        st.caption("Settings changed. Click Refresh data to apply.")
+
+    if refresh_clicked:
+        st.session_state["applied_location_label"] = location_label
+        st.session_state["applied_mode"] = mode
+        st.session_state["applied_item_query"] = item_query
+        st.session_state["applied_use_llm_search"] = use_llm_search
+        applied_location_label = location_label
+        applied_mode = mode
+        applied_item_query = item_query
+        applied_use_llm_search = use_llm_search
+
     st.caption("Use supabase_loader.py to ingest local files into Supabase.")
 
 client = init_supabase_client()
@@ -495,7 +513,7 @@ if client is None:
     st.stop()
 
 try:
-    selected_location_terms = LOCATION_FILTERS[location_label]
+    selected_location_terms = LOCATION_FILTERS[applied_location_label]
     all_data = read_db_data(client, location_terms=selected_location_terms)
 except Exception as exc:
     err_text = str(exc)
@@ -517,9 +535,14 @@ if all_data.empty:
     st.error("No records found in Supabase charges table. Run supabase_loader.py to ingest data.")
     st.stop()
 
-st.caption(f"Database: Supabase API | region: {location_label} | records: {len(all_data):,}")
+st.caption(f"Database: Supabase API | region: {applied_location_label} | records: {len(all_data):,}")
 
-summary = build_provider_summary(all_data, mode, item_query, use_llm_search=use_llm_search)
+summary = build_provider_summary(
+    all_data,
+    applied_mode,
+    applied_item_query,
+    use_llm_search=applied_use_llm_search,
+)
 
 if summary.empty:
     st.error(
