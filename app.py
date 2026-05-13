@@ -264,8 +264,10 @@ def read_db_data(client, location_terms: Optional[List[str]] = None) -> pd.DataF
                 if location_terms:
                     escaped_terms = [str(t).replace(",", " ").strip() for t in location_terms if str(t).strip()]
                     if escaped_terms:
-                        or_filter = ",".join([f"provider.ilike.%{term}%" for term in escaped_terms])
-                        query = query.or_(or_filter)
+                        # Keep URL/query payload small; large OR filters can trigger Cloudflare 400s.
+                        if len(escaped_terms) <= 3 and all(len(t) <= 24 for t in escaped_terms):
+                            or_filter = ",".join([f"provider.ilike.%{term}%" for term in escaped_terms])
+                            query = query.or_(or_filter)
                 resp = query.range(start, start + page_size - 1).execute()
                 last_exc = None
                 break
@@ -517,9 +519,9 @@ try:
     all_data = read_db_data(client, location_terms=selected_location_terms)
 except Exception as exc:
     err_text = str(exc)
-    if "57014" in err_text and selected_location_terms:
+    if ("57014" in err_text or "JSON could not be generated" in err_text or "400 Bad Request" in err_text) and selected_location_terms:
         st.warning(
-            "Supabase timed out on server-side region filter. Falling back to full read + local filtering."
+            "Supabase server-side region filter failed. Falling back to full read + local filtering."
         )
         try:
             all_data = read_db_data(client, location_terms=None)
