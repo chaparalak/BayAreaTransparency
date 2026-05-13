@@ -292,6 +292,15 @@ def read_db_data(client, location_terms: Optional[List[str]] = None) -> pd.DataF
     return pd.DataFrame(all_rows)
 
 
+def filter_location_local(df: pd.DataFrame, location_terms: Optional[List[str]]) -> pd.DataFrame:
+    terms = [str(t).strip().lower() for t in (location_terms or []) if str(t).strip()]
+    if not terms or df.empty:
+        return df
+    provider_series = df.get("provider", pd.Series(dtype=str)).astype(str).str.lower()
+    mask = provider_series.apply(lambda p: any(term in p for term in terms))
+    return df[mask].copy()
+
+
 def parse_price(value) -> Optional[float]:
     if pd.isna(value):
         return None
@@ -489,8 +498,20 @@ try:
     selected_location_terms = LOCATION_FILTERS[location_label]
     all_data = read_db_data(client, location_terms=selected_location_terms)
 except Exception as exc:
-    st.error(f"Unable to query Supabase charges table via API: {exc}")
-    st.stop()
+    err_text = str(exc)
+    if "57014" in err_text and selected_location_terms:
+        st.warning(
+            "Supabase timed out on server-side region filter. Falling back to full read + local filtering."
+        )
+        try:
+            all_data = read_db_data(client, location_terms=None)
+            all_data = filter_location_local(all_data, selected_location_terms)
+        except Exception as fallback_exc:
+            st.error(f"Unable to query Supabase charges table via API: {fallback_exc}")
+            st.stop()
+    else:
+        st.error(f"Unable to query Supabase charges table via API: {exc}")
+        st.stop()
 
 if all_data.empty:
     st.error("No records found in Supabase charges table. Run supabase_loader.py to ingest data.")
