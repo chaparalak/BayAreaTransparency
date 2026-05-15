@@ -260,7 +260,7 @@ def read_db_data(client, location_terms: Optional[List[str]] = None) -> pd.DataF
         resp = None
         for attempt in range(3):
             try:
-                query = client.table("charges").select("provider,item,price,lat,lon,source_file")
+                query = client.table("charges").select("provider,item,price,insurance_type,lat,lon,source_file")
                 if location_terms:
                     escaped_terms = [str(t).replace(",", " ").strip() for t in location_terms if str(t).strip()]
                     if escaped_terms:
@@ -272,6 +272,12 @@ def read_db_data(client, location_terms: Optional[List[str]] = None) -> pd.DataF
                 last_exc = None
                 break
             except Exception as exc:
+                err_text = str(exc)
+                if "insurance_type" in err_text and "column" in err_text:
+                    query = client.table("charges").select("provider,item,price,lat,lon,source_file")
+                    resp = query.range(start, start + page_size - 1).execute()
+                    last_exc = None
+                    break
                 last_exc = exc
                 time.sleep(0.8 * (attempt + 1))
         if last_exc is not None:
@@ -284,6 +290,20 @@ def read_db_data(client, location_terms: Optional[List[str]] = None) -> pd.DataF
             break
         start += page_size
     return pd.DataFrame(all_rows)
+
+
+def apply_insurance_filter(df: pd.DataFrame, insurance_view: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if "insurance_type" not in df.columns:
+        df = df.copy()
+        df["insurance_type"] = "unknown"
+
+    if insurance_view == "With insurance":
+        return df[df["insurance_type"].fillna("unknown") == "with_insurance"].copy()
+    if insurance_view == "Without insurance":
+        return df[df["insurance_type"].fillna("unknown") == "without_insurance"].copy()
+    return df
 
 
 def filter_location_local(df: pd.DataFrame, location_terms: Optional[List[str]]) -> pd.DataFrame:
@@ -478,9 +498,11 @@ with st.sidebar:
     applied_mode = st.session_state.get("applied_mode", "Average across all items")
     applied_item_query = st.session_state.get("applied_item_query", "")
     applied_use_llm_search = st.session_state.get("applied_use_llm_search", False)
+    applied_insurance_view = st.session_state.get("applied_insurance_view", "Both")
 
     location_label = st.selectbox("Region to load", list(LOCATION_FILTERS.keys()), index=list(LOCATION_FILTERS.keys()).index(applied_location_label))
     mode = st.radio("View mode", ["Average across all items", "Specific item"], index=0 if applied_mode == "Average across all items" else 1)
+    insurance_view = st.radio("Insurance prices", ["Both", "With insurance", "Without insurance"], index=["Both", "With insurance", "Without insurance"].index(applied_insurance_view))
     item_query = ""
     use_llm_search = False
     if mode == "Specific item":
@@ -492,6 +514,7 @@ with st.sidebar:
         or mode != applied_mode
         or item_query != applied_item_query
         or use_llm_search != applied_use_llm_search
+        or insurance_view != applied_insurance_view
     )
     refresh_clicked = st.button("Refresh data")
     if pending_changes and not refresh_clicked:
@@ -502,10 +525,12 @@ with st.sidebar:
         st.session_state["applied_mode"] = mode
         st.session_state["applied_item_query"] = item_query
         st.session_state["applied_use_llm_search"] = use_llm_search
+        st.session_state["applied_insurance_view"] = insurance_view
         applied_location_label = location_label
         applied_mode = mode
         applied_item_query = item_query
         applied_use_llm_search = use_llm_search
+        applied_insurance_view = insurance_view
 
     st.caption("Use supabase_loader.py to ingest local files into Supabase.")
 
@@ -538,6 +563,11 @@ if all_data.empty:
     st.stop()
 
 st.caption(f"Database: Supabase API | region: {applied_location_label} | records: {len(all_data):,}")
+
+all_data = apply_insurance_filter(all_data, applied_insurance_view)
+if all_data.empty:
+    st.error("No records after insurance filter. Try switching insurance view to Both.")
+    st.stop()
 
 summary = build_provider_summary(
     all_data,
