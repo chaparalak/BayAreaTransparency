@@ -306,6 +306,26 @@ def apply_insurance_filter(df: pd.DataFrame, insurance_view: str) -> pd.DataFram
     return df
 
 
+def build_provider_table(df: pd.DataFrame, insurance_view: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["name", "insurance_type", "avg_price"])
+    work = df.copy()
+    if "insurance_type" not in work.columns:
+        work["insurance_type"] = "unknown"
+    work["insurance_type"] = work["insurance_type"].fillna("unknown")
+
+    grouped = (
+        work.groupby(["provider", "insurance_type"], as_index=False)["price"]
+        .mean()
+        .rename(columns={"provider": "name", "price": "avg_price"})
+        .sort_values(["name", "insurance_type"], ascending=[True, True])
+    )
+
+    if insurance_view in {"With insurance", "Without insurance"}:
+        return grouped[["name", "avg_price"]].sort_values("avg_price", ascending=True)
+    return grouped[["name", "insurance_type", "avg_price"]].sort_values("avg_price", ascending=True)
+
+
 def filter_location_local(df: pd.DataFrame, location_terms: Optional[List[str]]) -> pd.DataFrame:
     terms = [str(t).strip().lower() for t in (location_terms or []) if str(t).strip()]
     if not terms or df.empty:
@@ -558,6 +578,9 @@ except Exception as exc:
         st.error(f"Unable to query Supabase charges table via API: {exc}")
         st.stop()
 
+# Always apply local filter to guarantee region accuracy, even if server-side filter was skipped.
+all_data = filter_location_local(all_data, selected_location_terms)
+
 if all_data.empty:
     st.error("No records found in Supabase charges table. Run supabase_loader.py to ingest data.")
     st.stop()
@@ -612,5 +635,5 @@ tooltip = {
 st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip))
 
 st.subheader("Provider price table")
-table_summary = summary[["provider", "avg_price"]].rename(columns={"provider": "name"}).sort_values("avg_price", ascending=True)
+table_summary = build_provider_table(all_data, applied_insurance_view)
 st.dataframe(table_summary, use_container_width=True)
